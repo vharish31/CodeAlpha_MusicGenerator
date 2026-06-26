@@ -21,7 +21,10 @@ import {
   TrendingDown,
   Sparkles,
   Upload,
-  History
+  History,
+  Circle,
+  Save,
+  Trash2
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -124,6 +127,11 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [generatedNotes, setGeneratedNotes] = useState<NoteEvent[]>([]);
   const [generationLogs, setGenerationLogs] = useState<string[]>([]);
+
+  // HTML5 Native Audio track state for uploaded MP3/WAV/etc files
+  const [isAudioTrack, setIsAudioTrack] = useState<boolean>(false);
+  const [audioDuration, setAudioDuration] = useState<number>(30);
+  const audioTrackRef = useRef<HTMLAudioElement | null>(null);
   
   // Audio playback states
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -134,11 +142,15 @@ export default function App() {
 
   useEffect(() => {
     let animId: number;
-    if (isPlaying && generatedNotes.length > 0) {
+    if (isPlaying && (isAudioTrack || generatedNotes.length > 0)) {
       const updateProgress = () => {
-        const elapsedSeconds = (Date.now() - playbackStartTimestampRef.current) / 1000;
-        const currentBeat = elapsedSeconds * (tempoBpm / 60);
-        setPlaybackBeat(currentBeat);
+        if (isAudioTrack && audioTrackRef.current) {
+          setPlaybackBeat(audioTrackRef.current.currentTime);
+        } else {
+          const elapsedSeconds = (Date.now() - playbackStartTimestampRef.current) / 1000;
+          const currentBeat = elapsedSeconds * (tempoBpm / 60);
+          setPlaybackBeat(currentBeat);
+        }
         animId = requestAnimationFrame(updateProgress);
       };
       animId = requestAnimationFrame(updateProgress);
@@ -148,7 +160,7 @@ export default function App() {
     return () => {
       cancelAnimationFrame(animId);
     };
-  }, [isPlaying, tempoBpm, generatedNotes]);
+  }, [isPlaying, tempoBpm, generatedNotes, isAudioTrack]);
 
   // Audio web synthesis reference
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -175,6 +187,19 @@ export default function App() {
   const [selectedComposition, setSelectedComposition] = useState<string>('');
   const [uploadError, setUploadError] = useState<string>('');
   const [uploadSuccess, setUploadSuccess] = useState<string>('');
+
+  // Interactive Manual Track Recording States
+  const [isManualRecording, setIsManualRecording] = useState<boolean>(false);
+  const [manualTitle, setManualTitle] = useState<string>("My Custom Symphony");
+  const [manualNotes, setManualNotes] = useState<NoteEvent[]>([]);
+  const [manualBeatPointer, setManualBeatPointer] = useState<number>(0);
+  const [manualSaveError, setManualSaveError] = useState<string>("");
+  const [manualSaveSuccess, setManualSaveSuccess] = useState<string>("");
+
+  // Custom Completed Composition Track Upload States
+  const [compUploadError, setCompUploadError] = useState<string>("");
+  const [compUploadSuccess, setCompUploadSuccess] = useState<string>("");
+  const [isUploadingComp, setIsUploadingComp] = useState<boolean>(false);
 
   // Fetch functions for Flask Backend
   const fetchDataset = async () => {
@@ -233,18 +258,112 @@ export default function App() {
     }
   };
 
+  const handleCompositionUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsUploadingComp(true);
+    setCompUploadError("");
+    setCompUploadSuccess("");
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/api/compositions/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setCompUploadSuccess(data.message || `Uploaded track '${file.name}' successfully!`);
+        fetchCompositions();
+        if (data.filename) {
+          // Immediately load the uploaded composition!
+          handleLoadComposition(data.filename);
+        }
+        setTimeout(() => setCompUploadSuccess(""), 4000);
+      } else {
+        setCompUploadError(data.error || "Upload failed");
+      }
+    } catch (err) {
+      setCompUploadError("Network error occurred during track upload.");
+    } finally {
+      setIsUploadingComp(false);
+    }
+  };
+
   const handleLoadComposition = async (filename: string) => {
     try {
+      // Always stop active playback before loading a new track
+      stopPlayback();
+
       const res = await fetch(`/api/compositions/${filename}`);
       const data = await res.json();
-      if (res.ok && data.notes) {
-        setGeneratedNotes(data.notes);
+      if (res.ok) {
         setSelectedComposition(filename);
+        if (data.isAudio) {
+          setIsAudioTrack(true);
+          setGeneratedNotes([]);
+
+          if (audioTrackRef.current) {
+            audioTrackRef.current.pause();
+          }
+
+          const audio = new Audio(`/api/audio/${filename}`);
+          audioTrackRef.current = audio;
+
+          audio.addEventListener("loadedmetadata", () => {
+            setAudioDuration(audio.duration || 30);
+          });
+
+          audio.addEventListener("ended", () => {
+            setIsPlaying(false);
+          });
+        } else {
+          setIsAudioTrack(false);
+          setGeneratedNotes(data.notes || []);
+        }
       } else {
         console.error("Error loading composition notes:", data.error);
       }
     } catch (err) {
       console.error("Error loading composition:", err);
+    }
+  };
+
+  const handleDeleteComposition = async (filename: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (!window.confirm(`Are you sure you want to delete the track '${filename}'?`)) {
+      return;
+    }
+
+    try {
+      // Optimistically update the UI to instantly remove from list
+      setCompositions((prev) => prev.filter(comp => comp.filename !== filename));
+
+      const res = await fetch(`/api/compositions/${encodeURIComponent(filename)}`, {
+        method: "DELETE"
+      });
+      if (res.ok) {
+        if (selectedComposition === filename) {
+          stopPlayback();
+          setSelectedComposition("");
+          setGeneratedNotes([]);
+          setIsAudioTrack(false);
+        }
+        // Fetch to ensure synchronization with the database
+        fetchCompositions();
+      } else {
+        const data = await res.json();
+        console.error("Failed to delete track:", data.error);
+        // Rollback on failure
+        fetchCompositions();
+      }
+    } catch (err) {
+      console.error("Error deleting composition:", err);
+      // Rollback on failure
+      fetchCompositions();
     }
   };
 
@@ -344,6 +463,70 @@ export default function App() {
     setTimeout(() => {
       setActiveNotes(prev => prev.filter(p => p !== pitch));
     }, 400);
+
+    // Live Step-Time Keyboard Recording
+    if (isManualRecording) {
+      const newNoteEvent: NoteEvent = {
+        pitch,
+        time: manualBeatPointer,
+        duration: 0.5,
+        velocity: 90
+      };
+      setManualNotes(prev => [...prev, newNoteEvent]);
+      setManualBeatPointer(prev => parseFloat((prev + 0.5).toFixed(2)));
+    }
+  };
+
+  const handleSaveManualTrack = async () => {
+    if (!manualTitle.trim()) {
+      setManualSaveError("Please enter a track name.");
+      return;
+    }
+    if (manualNotes.length === 0) {
+      setManualSaveError("Please record or input some notes first!");
+      return;
+    }
+
+    setManualSaveError("");
+    setManualSaveSuccess("");
+
+    try {
+      const res = await fetch("/api/compositions/manual", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          title: manualTitle,
+          genre: selectedGenre,
+          notes: manualNotes
+        })
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setManualSaveSuccess(data.message || `Saved '${manualTitle}' successfully!`);
+        fetchCompositions();
+        
+        // Auto-select and load the newly recorded track
+        if (data.filename) {
+          setSelectedComposition(data.filename);
+        }
+        if (data.notes) {
+          setGeneratedNotes(data.notes);
+        }
+        
+        // Reset recording states
+        setIsManualRecording(false);
+        setManualNotes([]);
+        setManualBeatPointer(0);
+        setTimeout(() => setManualSaveSuccess(""), 4000);
+      } else {
+        setManualSaveError(data.error || "Failed to save track.");
+      }
+    } catch (err) {
+      setManualSaveError("Network error occurred during manual track save.");
+    }
   };
 
   // -------------------------------------------------------------
@@ -394,8 +577,18 @@ export default function App() {
   // MELODY REAL-TIME PLAYER ENGINE
   // -------------------------------------------------------------
   const startPlayback = () => {
-    if (generatedNotes.length === 0) return;
     initAudio();
+    if (isAudioTrack) {
+      if (audioTrackRef.current) {
+        audioTrackRef.current.play().catch(err => {
+          console.error("Audio playback failed:", err);
+        });
+        setIsPlaying(true);
+      }
+      return;
+    }
+
+    if (generatedNotes.length === 0) return;
     setIsPlaying(true);
     playbackStartTimestampRef.current = Date.now();
     const ticksPerSecond = tempoBpm / 60; // beats per second
@@ -433,6 +626,15 @@ export default function App() {
   };
 
   const stopPlayback = () => {
+    if (isAudioTrack) {
+      if (audioTrackRef.current) {
+        audioTrackRef.current.pause();
+        audioTrackRef.current.currentTime = 0;
+      }
+      setIsPlaying(false);
+      return;
+    }
+
     playbackTimersRef.current.forEach(clearTimeout);
     playbackTimersRef.current = [];
     setActiveNotes([]);
@@ -539,7 +741,7 @@ export default function App() {
   const maxBeat = generatedNotes.length > 0 
     ? Math.max(...generatedNotes.map(n => n.time + n.duration)) 
     : 32;
-  const totalBeats = Math.max(maxBeat, 16);
+  const totalBeats = isAudioTrack ? audioDuration : Math.max(maxBeat, 16);
 
   const notePitches = generatedNotes.map(n => n.pitch);
   const minPitch = notePitches.length > 0 ? Math.min(...notePitches) - 1 : 55;
@@ -785,6 +987,108 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Manual Track Composer Card */}
+              <div className="bg-[#050914]/60 backdrop-blur-md border border-slate-900/85 rounded-2xl p-6 shadow-2xl flex flex-col gap-4">
+                <div className="flex justify-between items-center pb-2 border-b border-slate-800/80">
+                  <h3 className="text-sm font-semibold font-display text-white uppercase tracking-wider flex items-center gap-1.5">
+                    <Music className="w-4 h-4 text-emerald-400" /> Manual Track Composer
+                  </h3>
+                  {isManualRecording && (
+                    <span className="flex items-center gap-1.5 bg-rose-500/10 border border-rose-500/30 px-2 py-0.5 rounded text-[10px] text-rose-400 font-mono animate-pulse">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span> RECORDING
+                    </span>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Turn the piano keyboard below into a step-time sequencer! Click "Start Recording", then click piano keys below to record note events.
+                </p>
+
+                <div className="space-y-4">
+                  {/* Track Title */}
+                  <div>
+                    <label className="block text-[10px] text-slate-500 font-mono uppercase mb-1">Track Title</label>
+                    <input
+                      type="text"
+                      value={manualTitle}
+                      onChange={(e) => setManualTitle(e.target.value)}
+                      placeholder="e.g. My Custom Symphony"
+                      className="w-full px-3 py-2 bg-slate-950/60 border border-slate-850 rounded-lg text-xs text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-all font-mono"
+                    />
+                  </div>
+
+                  {/* Recording control */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => {
+                        setIsManualRecording(!isManualRecording);
+                        if (!isManualRecording) {
+                          setManualNotes([]);
+                          setManualBeatPointer(0);
+                        }
+                      }}
+                      className={`py-2 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-1.5 border ${
+                        isManualRecording
+                          ? 'bg-rose-500/15 border-rose-500/40 text-rose-400 shadow-glow-rose'
+                          : 'bg-slate-950/40 border-slate-850 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <Circle className={`w-3 h-3 ${isManualRecording ? 'fill-rose-500 text-rose-500' : 'text-slate-400'}`} />
+                      {isManualRecording ? 'Stop Rec' : 'Start Rec'}
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setManualNotes([]);
+                        setManualBeatPointer(0);
+                      }}
+                      disabled={manualNotes.length === 0}
+                      className="py-2 bg-slate-950/40 border border-slate-850 hover:border-slate-700 disabled:border-slate-900 disabled:text-slate-600 disabled:cursor-not-allowed text-slate-300 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all duration-200"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  {/* Note Count Status / Pointer */}
+                  {manualNotes.length > 0 && (
+                    <div className="bg-slate-950/60 rounded-xl border border-slate-850 p-3 font-mono text-[11px] text-slate-400 flex flex-col gap-1.5">
+                      <div className="flex justify-between items-center text-slate-300">
+                        <span>Notes Recorded:</span>
+                        <span className="font-bold text-emerald-400">{manualNotes.length} notes</span>
+                      </div>
+                      <div className="flex justify-between items-center text-slate-500 text-[10px]">
+                        <span>Timeline cursor:</span>
+                        <span>{manualBeatPointer.toFixed(1)} beats</span>
+                      </div>
+                      
+                      {/* Short list of last 5 recorded notes */}
+                      <div className="border-t border-slate-900/60 mt-1.5 pt-1.5 flex flex-wrap gap-1">
+                        {manualNotes.slice(-5).map((n, i) => (
+                          <span key={i} className="bg-slate-900 px-1.5 py-0.5 rounded border border-slate-850 text-[10px] text-indigo-400 font-bold">
+                            MIDI {n.pitch}
+                          </span>
+                        ))}
+                        {manualNotes.length > 5 && <span className="text-slate-600 self-center text-[9px]">...</span>}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Save button */}
+                  <button
+                    onClick={handleSaveManualTrack}
+                    disabled={manualNotes.length === 0}
+                    className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white rounded-lg font-semibold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-2 shadow-glow-emerald"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    Save Custom Track
+                  </button>
+
+                  {/* Status Messages */}
+                  {manualSaveError && <p className="text-[10px] text-rose-400 font-mono text-center">{manualSaveError}</p>}
+                  {manualSaveSuccess && <p className="text-[10px] text-emerald-400 font-mono text-center animate-bounce">{manualSaveSuccess}</p>}
+                </div>
+              </div>
+
               {/* Compositions History Card */}
               <div className="bg-[#050914]/60 backdrop-blur-md border border-slate-900/85 rounded-2xl p-6 shadow-2xl flex flex-col">
                 <div className="flex justify-between items-center mb-4 pb-2 border-b border-slate-800/80">
@@ -828,19 +1132,50 @@ export default function App() {
                           </div>
                           <div className="flex justify-between items-center text-[10px] text-slate-500">
                             <span>{comp.created}</span>
-                            <a 
-                              href={`/api/download/${comp.filename}`}
-                              download
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-sans"
-                            >
-                              <Download className="w-3 h-3" /> Download
-                            </a>
+                            <div className="flex items-center gap-3">
+                              <a 
+                                href={`/api/download/${comp.filename}`}
+                                download
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-sans"
+                              >
+                                <Download className="w-3 h-3" /> Download
+                              </a>
+                              <button
+                                onClick={(e) => handleDeleteComposition(comp.filename, e)}
+                                className="text-rose-400 hover:text-rose-300 flex items-center gap-1 font-sans transition-colors"
+                                title="Delete Track"
+                              >
+                                <Trash2 className="w-3 h-3" /> Delete
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
                     })
                   )}
+                </div>
+
+                {/* Upload Custom MIDI Track */}
+                 <div className="mt-4 pt-4 border-t border-slate-800/80">
+                  <span className="block text-[10px] text-slate-500 font-mono uppercase mb-2">Or Import/Upload Completed MIDI/Audio Track</span>
+                  <label className="flex flex-col items-center justify-center border border-dashed border-slate-800 hover:border-indigo-500/50 bg-slate-950/30 hover:bg-indigo-600/5 rounded-xl p-4 cursor-pointer group transition-all duration-300">
+                    <div className="flex flex-col items-center gap-1.5 text-center">
+                      <Upload className="w-5 h-5 text-slate-500 group-hover:text-indigo-400 group-hover:scale-110 transition-all duration-300" />
+                      <span className="text-[11px] text-slate-400 group-hover:text-slate-200 transition-colors">
+                        {isUploadingComp ? "Uploading track..." : "Choose or drag MIDI/Audio composition file"}
+                      </span>
+                    </div>
+                    <input 
+                      type="file" 
+                      accept=".mid,.midi,.mp3,.wav,.ogg,.m4a,.aac,.webm" 
+                      onChange={handleCompositionUpload} 
+                      className="hidden" 
+                      disabled={isUploadingComp}
+                    />
+                  </label>
+                  {compUploadError && <p className="text-[10px] text-rose-400 mt-2 font-mono text-center">{compUploadError}</p>}
+                  {compUploadSuccess && <p className="text-[10px] text-emerald-400 mt-2 font-mono text-center animate-bounce">{compUploadSuccess}</p>}
                 </div>
               </div>
             </div>
@@ -975,7 +1310,42 @@ export default function App() {
                     </span>
                   </div>
 
-                  {generatedNotes.length === 0 ? (
+                  {isAudioTrack ? (
+                    <div className="relative h-40 bg-[#02050c] border border-slate-900/80 rounded-lg p-4 overflow-hidden flex flex-col justify-between">
+                      {/* Waveform Visualization Bars */}
+                      <div className="flex items-end justify-between h-20 w-full px-2 gap-[2px]">
+                        {Array.from({ length: 48 }).map((_, i) => {
+                          const stableHeight = 15 + Math.sin(i * 0.4) * 20 + Math.cos(i * 0.9) * 15;
+                          const randomWiggle = isPlaying ? Math.random() * 25 : 0;
+                          const height = Math.min(Math.max(5, stableHeight + randomWiggle), 65);
+                          const isActive = (playbackBeat / totalBeats) * 48 > i;
+
+                          return (
+                            <div
+                              key={i}
+                              className={`w-full rounded-t transition-all duration-150 ${
+                                isActive 
+                                  ? "bg-gradient-to-t from-cyan-500 to-indigo-400" 
+                                  : "bg-slate-800/40"
+                              }`}
+                              style={{ height: `${height}%` }}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      {/* Timeline HUD */}
+                      <div className="flex justify-between items-center text-[10px] text-slate-500 font-mono mt-2 pt-2 border-t border-slate-900/50">
+                        <span>AUDIO PLAYBACK STREAM</span>
+                        <span className="text-cyan-400 font-semibold uppercase animate-pulse">
+                          {isPlaying ? "SIGNAL ACTIVE" : "SIGNAL IDLE"}
+                        </span>
+                        <span>
+                          {Math.floor(playbackBeat / 60)}:{(Math.floor(playbackBeat % 60)).toString().padStart(2, "0")} / {Math.floor(totalBeats / 60)}:{(Math.floor(totalBeats % 60)).toString().padStart(2, "0")}
+                        </span>
+                      </div>
+                    </div>
+                  ) : generatedNotes.length === 0 ? (
                     <div className="h-32 flex flex-col items-center justify-center text-center px-4 border border-dashed border-slate-800/60 rounded-lg bg-[#070b14]/30">
                       <Sparkles className="w-6 h-6 text-slate-700 animate-pulse mb-2" />
                       <span className="text-xs text-slate-500 font-medium font-display">Neural Sequencer Grid Empty</span>
