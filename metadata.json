@@ -1,0 +1,6 @@
+{
+  "name": "Music Generation with AI Using LSTM Neural Networks",
+  "description": "An interactive dashboard and complete Python source code workspace for AI music generation. Train models, adjust temperature, generate original MIDI, play melodies on a piano synthesizer, and download the full college-ready project.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

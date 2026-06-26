@@ -1,0 +1,8 @@
+# Python Dependencies for AI LSTM Music Generation
+tensorflow>=2.15.0
+keras>=2.15.0
+numpy>=1.24.3
+pandas>=2.0.0
+music21>=9.1.0
+matplotlib>=3.7.0
+midiutil>=1.2.1
